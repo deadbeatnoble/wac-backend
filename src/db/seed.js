@@ -66,13 +66,13 @@ async function seed() {
        ON CONFLICT (id) DO NOTHING`
     );
 
-    const tourCount = await client.query('SELECT COUNT(*) FROM tournaments');
+    /*const tourCount = await client.query('SELECT COUNT(*) FROM tournaments');
     if (parseInt(tourCount.rows[0].count, 10) === 0) {
       await client.query(
         `INSERT INTO tournaments (name, status, registrations_open, prize_description)
          VALUES ('Grand Prize Tournament 2025', 'registration_open', true, 'Premium Car Package')`
       );
-    }
+    }*/
 
     console.log('Seed completed.');
     if (adminRes.rows[0]) {

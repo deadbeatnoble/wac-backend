@@ -13,6 +13,8 @@ import settingsRoutes from './routes/settings.js';
 import publicRoutes from './routes/public.js';
 import playerRoutes from './routes/players.js';
 import auditRoutes from './routes/audit.js';
+import { bootstrapDatabase } from './db/bootstrap.js';
+import { handleDbError } from './middleware/db-errors.js';
 
 dotenv.config();
 
@@ -36,11 +38,21 @@ app.use('/api/audit', auditRoutes);
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
+app.use(handleDbError);
+
 app.use((err, _req, res, _next) => {
   console.error(err);
-  res.status(500).json({ error: err.message || 'Server error' });
+  const status = err.statusCode && err.statusCode >= 400 && err.statusCode < 600 ? err.statusCode : 500;
+  res.status(status).json({ error: err.message || 'Server error' });
 });
 
-app.listen(PORT, () => {
-  console.log(`API running on http://localhost:${PORT}`);
-});
+bootstrapDatabase()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`API running on http://localhost:${PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error('Failed to start API:', err);
+    process.exit(1);
+  });

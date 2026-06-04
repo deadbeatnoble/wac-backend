@@ -1,7 +1,12 @@
 import { Router } from 'express';
 import pool from '../db/pool.js';
 import { requireAdmin } from '../middleware/auth.js';
-import { calculateTournamentSchedule, buildRoundNames } from '../services/schedule.js';
+import {
+  calculateTournamentSchedule,
+  buildRoundNames,
+  getMatchScheduledDate,
+} from '../services/schedule.js';
+import { applyScheduleToBracket } from '../services/bracket-schedule.js';
 import {
   getActiveTournamentId,
   getActiveTournament,
@@ -9,6 +14,13 @@ import {
   logAdminAction,
 } from '../services/active-tournament.js';
 import { appendChampionToNews } from '../services/champion-news.js';
+import {
+  parseTournamentId,
+  parseParticipantId,
+  parseMatchId,
+  parseRegistrationId,
+} from '../lib/ids.js';
+import { asyncHandler } from '../middleware/db-errors.js';
 
 const router = Router();
 
@@ -111,7 +123,8 @@ router.post('/', requireAdmin, async (req, res) => {
 
 router.post('/:id/clone', requireAdmin, async (req, res) => {
   try {
-    const source = await pool.query('SELECT * FROM tournaments WHERE id = $1', [req.params.id]);
+    const tourId = parseTournamentId(req.params.id);
+    const source = await pool.query('SELECT * FROM tournaments WHERE id = $1', [tourId]);
     if (!source.rows[0]) return res.status(404).json({ error: 'Not found' });
     const s = source.rows[0];
     const result = await pool.query(
@@ -133,13 +146,14 @@ router.post('/:id/clone', requireAdmin, async (req, res) => {
   }
 });
 
-router.get('/:id', async (req, res) => {
+router.get('/:id', asyncHandler(async (req, res) => {
+  const tourId = parseTournamentId(req.params.id);
   const activeId = await getActiveTournamentId();
   const tour = await pool.query(
     `SELECT t.*,
       (SELECT COUNT(*)::int FROM tournament_participants tp WHERE tp.tournament_id = t.id) AS participant_count
      FROM tournaments t WHERE t.id = $1`,
-    [req.params.id]
+    [tourId]
   );
   if (!tour.rows[0]) return res.status(404).json({ error: 'Not found' });
 
@@ -149,9 +163,9 @@ router.get('/:id', async (req, res) => {
        FROM tournament_participants tp
        JOIN registrations r ON r.id = tp.registration_id
        WHERE tp.tournament_id = $1 ORDER BY tp.seed NULLS LAST, tp.id`,
-      [req.params.id]
+      [tourId]
     ),
-    pool.query('SELECT * FROM tournament_rounds WHERE tournament_id = $1 ORDER BY round_number', [req.params.id]),
+    pool.query('SELECT * FROM tournament_rounds WHERE tournament_id = $1 ORDER BY round_number', [tourId]),
     pool.query(
       `SELECT m.*,
         p1r.first_name AS p1_first, p1r.last_name AS p1_last,
@@ -165,14 +179,14 @@ router.get('/:id', async (req, res) => {
        LEFT JOIN tournament_participants tpw ON tpw.id = m.winner_id
        LEFT JOIN registrations wr ON wr.id = tpw.registration_id
        WHERE m.tournament_id = $1 ORDER BY m.round_id, m.match_number`,
-      [req.params.id]
+      [tourId]
     ),
     pool.query(
       `SELECT tp.id, r.first_name, r.last_name FROM tournaments t
        LEFT JOIN tournament_participants tp ON tp.id = t.champion_participant_id
        LEFT JOIN registrations r ON r.id = tp.registration_id
        WHERE t.id = $1`,
-      [req.params.id]
+      [tourId]
     ),
   ]);
 
@@ -183,7 +197,7 @@ router.get('/:id', async (req, res) => {
     matches: matches.rows,
     champion: champion.rows[0],
   });
-});
+}));
 
 router.patch('/:id', requireAdmin, async (req, res) => {
   try {
@@ -216,7 +230,8 @@ router.patch('/:id', requireAdmin, async (req, res) => {
     }
     if (!sets.length) return res.status(400).json({ error: 'No fields to update' });
     sets.push('updated_at = NOW()');
-    values.push(req.params.id);
+    const tourId = parseTournamentId(req.params.id);
+    values.push(tourId);
     const result = await pool.query(
       `UPDATE tournaments SET ${sets.join(', ')} WHERE id = $${i} RETURNING *`,
       values
@@ -232,7 +247,7 @@ router.patch('/:id', requireAdmin, async (req, res) => {
 
 router.post('/:id/activate', requireAdmin, async (req, res) => {
   try {
-    const tournament = await setActiveTournament(parseInt(req.params.id, 10), req.admin.id);
+    const tournament = await setActiveTournament(parseTournamentId(req.params.id), req.admin.id);
     res.json({ tournament });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -241,9 +256,9 @@ router.post('/:id/activate', requireAdmin, async (req, res) => {
 
 router.post('/:id/archive', requireAdmin, async (req, res) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const id = parseTournamentId(req.params.id);
     const activeId = await getActiveTournamentId();
-    if (activeId === id) {
+    if (String(activeId) === String(id)) {
       return res.status(400).json({ error: 'Cannot archive the active tournament. Activate another first.' });
     }
     const result = await pool.query(
@@ -258,18 +273,19 @@ router.post('/:id/archive', requireAdmin, async (req, res) => {
   }
 });
 
-router.patch('/:id/close-registrations', requireAdmin, async (req, res) => {
+router.patch('/:id/close-registrations', requireAdmin, asyncHandler(async (req, res) => {
+  const tourId = parseTournamentId(req.params.id);
   const result = await pool.query(
     `UPDATE tournaments SET registrations_open = false, status = 'registration_closed', updated_at = NOW()
      WHERE id = $1 RETURNING *`,
-    [req.params.id]
+    [tourId]
   );
   if (!result.rows[0]) return res.status(404).json({ error: 'Not found' });
   res.json({ tournament: result.rows[0] });
-});
+}));
 
-router.post('/:id/sync-participants', requireAdmin, async (req, res) => {
-  const tourId = req.params.id;
+router.post('/:id/sync-participants', requireAdmin, asyncHandler(async (req, res) => {
+  const tourId = parseTournamentId(req.params.id);
   const approved = await pool.query(
     `SELECT id FROM registrations WHERE status = 'approved' AND tournament_id = $1
      AND id NOT IN (SELECT registration_id FROM tournament_participants WHERE tournament_id = $1)`,
@@ -286,21 +302,22 @@ router.post('/:id/sync-participants', requireAdmin, async (req, res) => {
     [tourId]
   );
   res.json({ synced: approved.rows.length, totalParticipants: count.rows[0].c });
-});
+}));
 
-router.post('/:id/participants', requireAdmin, async (req, res) => {
-  const { registrationId } = req.body;
+router.post('/:id/participants', requireAdmin, asyncHandler(async (req, res) => {
+  const tourId = parseTournamentId(req.params.id);
+  const registrationId = parseRegistrationId(req.body.registrationId);
   const result = await pool.query(
     `INSERT INTO tournament_participants (tournament_id, registration_id)
      VALUES ($1, $2) ON CONFLICT (tournament_id, registration_id) DO NOTHING RETURNING *`,
-    [req.params.id, registrationId]
+    [tourId, registrationId]
   );
   res.json({ participant: result.rows[0] });
-});
+}));
 
-router.delete('/:id/participants/:participantId', requireAdmin, async (req, res) => {
-  const participantId = parseInt(req.params.participantId, 10);
-  const tournamentId = parseInt(req.params.id, 10);
+router.delete('/:id/participants/:participantId', requireAdmin, asyncHandler(async (req, res) => {
+  const participantId = parseParticipantId(req.params.participantId);
+  const tournamentId = parseTournamentId(req.params.id);
 
   const inMatch = await pool.query(
     `SELECT COUNT(*)::int AS c FROM tournament_matches
@@ -320,11 +337,11 @@ router.delete('/:id/participants/:participantId', requireAdmin, async (req, res)
   ]);
   await logAdminAction(req.admin.id, 'remove_participant', 'tournament', tournamentId, { participantId });
   res.json({ success: true });
-});
+}));
 
 router.get('/:id/roster', requireAdmin, async (req, res) => {
   try {
-    const tournamentId = parseInt(req.params.id, 10);
+    const tournamentId = parseTournamentId(req.params.id);
     const search = (req.query.search || '').trim();
     let query = `
       SELECT tp.*, r.first_name, r.last_name, r.email, r.status AS registration_status,
@@ -350,8 +367,8 @@ router.get('/:id/roster', requireAdmin, async (req, res) => {
   }
 });
 
-router.get('/:id/available-registrations', requireAdmin, async (req, res) => {
-  const tournamentId = parseInt(req.params.id, 10);
+router.get('/:id/available-registrations', requireAdmin, asyncHandler(async (req, res) => {
+  const tournamentId = parseTournamentId(req.params.id);
   const result = await pool.query(
     `SELECT r.id, r.first_name, r.last_name, r.email, r.status
      FROM registrations r
@@ -363,14 +380,15 @@ router.get('/:id/available-registrations', requireAdmin, async (req, res) => {
     [tournamentId]
   );
   res.json({ registrations: result.rows });
-});
+}));
 
 router.patch('/:id/participants/:participantId/replace', requireAdmin, async (req, res) => {
   try {
-    const tournamentId = parseInt(req.params.id, 10);
-    const participantId = parseInt(req.params.participantId, 10);
-    const { registrationId } = req.body;
-    if (!registrationId) return res.status(400).json({ error: 'registrationId required' });
+    const tournamentId = parseTournamentId(req.params.id);
+    const participantId = parseParticipantId(req.params.participantId);
+    const { registrationId: rawRegId } = req.body;
+    if (!rawRegId) return res.status(400).json({ error: 'registrationId required' });
+    const registrationId = parseRegistrationId(rawRegId);
 
     const won = await pool.query(
       `SELECT COUNT(*)::int AS c FROM tournament_matches
@@ -411,67 +429,86 @@ router.patch('/:id/participants/:participantId/replace', requireAdmin, async (re
   }
 });
 
-router.get('/:id/export/participants', requireAdmin, async (req, res) => {
+router.get('/:id/export/participants', requireAdmin, asyncHandler(async (req, res) => {
+  const tourId = parseTournamentId(req.params.id);
   const result = await pool.query(
     `SELECT tp.id, r.first_name, r.last_name, r.email, tp.eliminated, tp.schedule_day
      FROM tournament_participants tp
      JOIN registrations r ON r.id = tp.registration_id
      WHERE tp.tournament_id = $1 ORDER BY tp.id`,
-    [req.params.id]
+    [tourId]
   );
   res.json({ participants: result.rows });
-});
+}));
 
-router.post('/:id/calculate-schedule', requireAdmin, async (req, res) => {
-  const { targetDays, endDate } = req.body;
-  const tourId = req.params.id;
+router.post('/:id/calculate-schedule', requireAdmin, asyncHandler(async (req, res) => {
+  const { targetDays, startDate } = req.body;
+  const tourId = parseTournamentId(req.params.id);
   const countRes = await pool.query(
     'SELECT COUNT(*)::int AS c FROM tournament_participants WHERE tournament_id = $1',
     [tourId]
   );
-  const approvedCount = countRes.rows[0].c;
-  let days = parseInt(targetDays, 10);
-  if (endDate) {
-    const end = new Date(endDate);
-    const now = new Date();
-    now.setHours(0, 0, 0, 0);
-    days = Math.max(1, Math.ceil((end - now) / (1000 * 60 * 60 * 24)));
+  const participantCount = countRes.rows[0].c;
+  if (participantCount < 2) {
+    return res.status(400).json({ error: 'Add at least 2 players to the roster before planning a schedule' });
   }
-  if (!days || days < 1) days = 5;
-  const schedule = calculateTournamentSchedule(approvedCount, days);
+
+  let days = parseInt(targetDays, 10);
+  if (!days || days < 1) days = Math.max(3, Math.ceil(Math.log2(participantCount)));
+
+  const schedule = calculateTournamentSchedule(participantCount, days, { startDate });
+  const lastDay = schedule.days?.[schedule.days.length - 1]?.date ?? null;
+
   await pool.query(
     `UPDATE tournaments SET schedule = $2::jsonb, end_date = $3, updated_at = NOW() WHERE id = $1`,
-    [tourId, JSON.stringify(schedule), endDate || null]
+    [tourId, JSON.stringify(schedule), lastDay]
   );
-  const participants = await pool.query(
-    'SELECT id FROM tournament_participants WHERE tournament_id = $1 ORDER BY id',
-    [tourId]
-  );
-  if (schedule.days?.length && participants.rows.length) {
-    const perDay = Math.ceil(participants.rows.length / schedule.days.length);
-    for (let i = 0; i < participants.rows.length; i++) {
-      const dayIndex = Math.min(Math.floor(i / perDay), schedule.days.length - 1);
-      await pool.query('UPDATE tournament_participants SET schedule_day = $2 WHERE id = $1', [
-        participants.rows[i].id,
-        schedule.days[dayIndex].day,
-      ]);
+
+  const applied = await applyScheduleToBracket(tourId, schedule);
+
+  await logAdminAction(req.admin.id, 'calculate_schedule', 'tournament', tourId, {
+    targetDays: schedule.targetDays,
+    totalMatches: schedule.totalMatches,
+    matchesDated: applied.updated,
+  });
+
+  res.json({ schedule, participantCount, matchesUpdated: applied.updated });
+}));
+
+router.post('/:id/start', requireAdmin, asyncHandler(async (req, res) => {
+  const tourId = parseTournamentId(req.params.id);
+  const tourRow = await pool.query('SELECT schedule FROM tournaments WHERE id = $1', [tourId]);
+  let schedule = tourRow.rows[0]?.schedule;
+  if (typeof schedule === 'string') {
+    try {
+      schedule = JSON.parse(schedule);
+    } catch {
+      schedule = null;
     }
   }
-  res.json({ schedule, approvedCount });
-});
 
-router.post('/:id/start', requireAdmin, async (req, res) => {
-  const tourId = req.params.id;
   const countRes = await pool.query(
     'SELECT COUNT(*)::int AS c FROM tournament_participants WHERE tournament_id = $1',
     [tourId]
   );
   const n = countRes.rows[0].c;
-  if (n < 2) return res.status(400).json({ error: 'Need at least 2 participants' });
+  if (n < 2) return res.status(400).json({ error: 'Need at least 2 participants on the roster' });
+
+  if (!schedule?.matchPlan?.length) {
+    schedule = calculateTournamentSchedule(n, Math.max(3, Math.ceil(Math.log2(n))));
+    await pool.query(
+      `UPDATE tournaments SET schedule = $2::jsonb, updated_at = NOW() WHERE id = $1`,
+      [tourId, JSON.stringify(schedule)]
+    );
+  }
 
   const roundNames = buildRoundNames(n);
   await pool.query('DELETE FROM tournament_matches WHERE tournament_id = $1', [tourId]);
   await pool.query('DELETE FROM tournament_rounds WHERE tournament_id = $1', [tourId]);
+  await pool.query(
+    'UPDATE tournament_participants SET eliminated = false WHERE tournament_id = $1',
+    [tourId]
+  );
 
   const rounds = [];
   for (let i = 0; i < roundNames.length; i++) {
@@ -490,28 +527,64 @@ router.post('/:id/start', requireAdmin, async (req, res) => {
   const round1 = rounds[0];
   let matchNum = 1;
   for (let i = 0; i < participants.rows.length; i += 2) {
-    await pool.query(
-      `INSERT INTO tournament_matches (tournament_id, round_id, match_number, player1_id, player2_id, status)
-       VALUES ($1, $2, $3, $4, $5, 'pending')`,
-      [tourId, round1.id, matchNum++, participants.rows[i]?.id, participants.rows[i + 1]?.id || null]
+    const p1 = participants.rows[i]?.id;
+    const p2 = participants.rows[i + 1]?.id ?? null;
+    const scheduledDate = getMatchScheduledDate(schedule, 1, matchNum);
+    const isBye = p1 && !p2;
+
+    const ins = await pool.query(
+      `INSERT INTO tournament_matches (tournament_id, round_id, match_number, player1_id, player2_id, status, scheduled_date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+      [
+        tourId,
+        round1.id,
+        matchNum,
+        p1,
+        p2,
+        isBye ? 'completed' : 'pending',
+        scheduledDate,
+      ]
     );
+
+    if (isBye) {
+      await pool.query(
+        `UPDATE tournament_matches SET winner_id = $2 WHERE id = $1`,
+        [ins.rows[0].id, p1]
+      );
+    }
+
+    matchNum += 1;
   }
 
   await pool.query(
     `UPDATE tournaments SET status = 'active', registrations_open = false, updated_at = NOW() WHERE id = $1`,
     [tourId]
   );
-  await logAdminAction(req.admin.id, 'start_tournament', 'tournament', parseInt(tourId, 10), {});
-  res.json({ message: 'Tournament started', rounds: rounds.length });
-});
+  await logAdminAction(req.admin.id, 'start_tournament', 'tournament', tourId, {
+    participants: n,
+    rounds: rounds.length,
+  });
+  res.json({
+    message: 'Single-elimination bracket started',
+    rounds: rounds.length,
+    schedule: schedule.summary,
+  });
+}));
 
 router.patch('/matches/:matchId/winner', requireAdmin, async (req, res) => {
-  const { winnerId, scheduledDate } = req.body;
-  const matchRes = await pool.query('SELECT * FROM tournament_matches WHERE id = $1', [req.params.matchId]);
+  const { winnerId: rawWinnerId, scheduledDate } = req.body;
+  const matchId = parseMatchId(req.params.matchId);
+  const matchRes = await pool.query('SELECT * FROM tournament_matches WHERE id = $1', [matchId]);
   const match = matchRes.rows[0];
   if (!match) return res.status(404).json({ error: 'Match not found' });
 
-  if (winnerId && winnerId !== match.player1_id && winnerId !== match.player2_id) {
+  const winnerId = rawWinnerId ? parseParticipantId(rawWinnerId) : null;
+
+  if (
+    winnerId &&
+    String(winnerId) !== String(match.player1_id) &&
+    String(winnerId) !== String(match.player2_id)
+  ) {
     return res.status(400).json({ error: 'Winner must be one of the match players' });
   }
 
@@ -585,19 +658,48 @@ router.patch('/matches/:matchId/winner', requireAdmin, async (req, res) => {
         `SELECT winner_id FROM tournament_matches WHERE round_id = $1 AND winner_id IS NOT NULL ORDER BY match_number`,
         [match.round_id]
       );
+      const tourScheduleRes = await pool.query('SELECT schedule FROM tournaments WHERE id = $1', [
+        match.tournament_id,
+      ]);
+      let schedule = tourScheduleRes.rows[0]?.schedule;
+      if (typeof schedule === 'string') {
+        try {
+          schedule = JSON.parse(schedule);
+        } catch {
+          schedule = null;
+        }
+      }
+
       let matchNum = 1;
+      const nextRoundNumber = roundRes.rows[0].round_number + 1;
       for (let i = 0; i < winners.rows.length; i += 2) {
-        await pool.query(
-          `INSERT INTO tournament_matches (tournament_id, round_id, match_number, player1_id, player2_id, status)
-           VALUES ($1, $2, $3, $4, $5, 'pending')`,
+        const p1 = winners.rows[i]?.winner_id;
+        const p2 = winners.rows[i + 1]?.winner_id ?? null;
+        const scheduledDate = getMatchScheduledDate(schedule, nextRoundNumber, matchNum);
+        const isBye = p1 && !p2;
+
+        const ins = await pool.query(
+          `INSERT INTO tournament_matches (tournament_id, round_id, match_number, player1_id, player2_id, status, scheduled_date)
+           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
           [
             match.tournament_id,
             nextRound.rows[0].id,
-            matchNum++,
-            winners.rows[i]?.winner_id,
-            winners.rows[i + 1]?.winner_id || null,
+            matchNum,
+            p1,
+            p2,
+            isBye ? 'completed' : 'pending',
+            scheduledDate,
           ]
         );
+
+        if (isBye) {
+          await pool.query(`UPDATE tournament_matches SET winner_id = $2 WHERE id = $1`, [
+            ins.rows[0].id,
+            p1,
+          ]);
+        }
+
+        matchNum += 1;
       }
     } else {
       await pool.query(`UPDATE tournaments SET status = 'completed', updated_at = NOW() WHERE id = $1`, [
@@ -610,7 +712,8 @@ router.patch('/matches/:matchId/winner', requireAdmin, async (req, res) => {
 });
 
 router.post('/matches/:matchId/undo', requireAdmin, async (req, res) => {
-  const matchRes = await pool.query('SELECT * FROM tournament_matches WHERE id = $1', [req.params.matchId]);
+  const matchId = parseMatchId(req.params.matchId);
+  const matchRes = await pool.query('SELECT * FROM tournament_matches WHERE id = $1', [matchId]);
   const match = matchRes.rows[0];
   if (!match || match.status !== 'completed') {
     return res.status(400).json({ error: 'Can only undo completed matches' });
@@ -637,8 +740,11 @@ router.post('/matches/:matchId/undo', requireAdmin, async (req, res) => {
 
 router.post('/:id/champion', requireAdmin, async (req, res) => {
   try {
-    const tournamentId = parseInt(req.params.id, 10);
-    const { participantId, prize, story, imageUrl, publish } = req.body;
+    const tournamentId = parseTournamentId(req.params.id);
+    const { participantId: rawParticipantId, prize, story, imageUrl, publish } = req.body;
+    const participantId = rawParticipantId
+      ? parseParticipantId(rawParticipantId)
+      : null;
     const result = await pool.query(
       `UPDATE tournaments SET
         champion_participant_id = $2,
@@ -685,7 +791,8 @@ router.post('/:id/champion', requireAdmin, async (req, res) => {
   }
 });
 
-router.get('/:id/match-history', requireAdmin, async (req, res) => {
+router.get('/:id/match-history', requireAdmin, asyncHandler(async (req, res) => {
+  const tourId = parseTournamentId(req.params.id);
   const result = await pool.query(
     `SELECT h.*, m.match_number, tr.name AS round_name,
       a.email AS admin_email
@@ -696,12 +803,13 @@ router.get('/:id/match-history', requireAdmin, async (req, res) => {
      WHERE m.tournament_id = $1
      ORDER BY h.created_at DESC
      LIMIT 100`,
-    [req.params.id]
+    [tourId]
   );
   res.json({ history: result.rows });
-});
+}));
 
-router.get('/:id/export/matches', requireAdmin, async (req, res) => {
+router.get('/:id/export/matches', requireAdmin, asyncHandler(async (req, res) => {
+  const tourId = parseTournamentId(req.params.id);
   const result = await pool.query(
     `SELECT m.*, tr.name AS round_name,
       p1r.first_name AS p1_first, p1r.last_name AS p1_last,
@@ -716,9 +824,9 @@ router.get('/:id/export/matches', requireAdmin, async (req, res) => {
      LEFT JOIN tournament_participants tpw ON tpw.id = m.winner_id
      LEFT JOIN registrations wr ON wr.id = tpw.registration_id
      WHERE m.tournament_id = $1 ORDER BY tr.round_number, m.match_number`,
-    [req.params.id]
+    [tourId]
   );
   res.json({ matches: result.rows });
-});
+}));
 
 export default router;

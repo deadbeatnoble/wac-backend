@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import pool from '../db/pool.js';
 import { requireAdmin } from '../middleware/auth.js';
+import { parseProfileId } from '../lib/ids.js';
 
 const router = Router();
 
@@ -28,7 +29,7 @@ router.get('/search', requireAdmin, async (req, res) => {
 
 router.get('/:id/history', requireAdmin, async (req, res) => {
   try {
-    const profileId = parseInt(req.params.id, 10);
+    const profileId = parseProfileId(req.params.id);
     const [profile, registrations, participations] = await Promise.all([
       pool.query('SELECT * FROM player_profiles WHERE id = $1', [profileId]),
       pool.query(

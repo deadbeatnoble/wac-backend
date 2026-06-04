@@ -11,11 +11,16 @@ if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 
+const ALLOWED_EXT = /\.(jpe?g|png|gif|webp|heic|heif|pdf)$/i;
+const ALLOWED_MIME =
+  /^(image\/(jpeg|png|gif|webp|heic|heif)|application\/pdf|application\/octet-stream)$/i;
+
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, uploadDir),
   filename: (_req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase() || '.bin';
     const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-    cb(null, `${unique}${path.extname(file.originalname)}`);
+    cb(null, `${unique}${ext}`);
   },
 });
 
@@ -23,11 +28,34 @@ const upload = multer({
   storage,
   limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
-    const allowed = /\.(jpg|jpeg|png|gif|webp|pdf)$/i;
-    if (allowed.test(path.extname(file.originalname))) cb(null, true);
-    else cb(new Error('Only images and PDF allowed'));
+    const ext = path.extname(file.originalname).toLowerCase();
+    const extOk = ALLOWED_EXT.test(ext);
+    const mimeOk = !file.mimetype || ALLOWED_MIME.test(file.mimetype);
+    if (extOk && mimeOk) {
+      cb(null, true);
+      return;
+    }
+    const err = new Error(
+      'Only images (JPEG, PNG, GIF, WebP, HEIC) and PDF files are allowed'
+    );
+    err.statusCode = 400;
+    cb(err);
   },
 });
+
+function multerSingle(fieldName) {
+  return (req, res, next) => {
+    upload.single(fieldName)(req, res, (err) => {
+      if (!err) return next();
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({ error: 'File too large (max 5MB)' });
+      }
+      return res.status(err.statusCode || 400).json({
+        error: err.message || 'Upload failed',
+      });
+    });
+  };
+}
 
 const router = Router();
 
@@ -37,7 +65,7 @@ function handleUpload(req, res) {
   res.json({ url, filename: req.file.filename });
 }
 
-router.post('/payment-proof', upload.single('file'), handleUpload);
-router.post('/banner', upload.single('file'), handleUpload);
+router.post('/payment-proof', multerSingle('file'), handleUpload);
+router.post('/banner', multerSingle('file'), handleUpload);
 
 export default router;

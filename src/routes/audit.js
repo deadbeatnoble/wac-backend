@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import pool from '../db/pool.js';
 import { requireAdmin } from '../middleware/auth.js';
+import { parseOptionalEntityId } from '../lib/ids.js';
+import { asyncHandler } from '../middleware/db-errors.js';
 
 const router = Router();
 
@@ -55,14 +57,14 @@ router.get('/match-history', requireAdmin, async (req, res) => {
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
     const offset = parseInt(req.query.offset, 10) || 0;
     const tournamentId = req.query.tournamentId
-      ? parseInt(req.query.tournamentId, 10)
+      ? parseOptionalEntityId(req.query.tournamentId, 'tournaments', 'id')
       : null;
 
     const params = [];
     let where = '';
     if (tournamentId) {
-      params.push(tournamentId);
-      where = `WHERE m.tournament_id = $1`;
+      params.push(String(tournamentId));
+      where = `WHERE m.tournament_id::text = $1::text`;
     }
 
     const countRes = await pool.query(

@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import pool from '../db/pool.js';
 import { getActiveTournament, getActiveTournamentId } from '../services/active-tournament.js';
+import { parseOptionalEntityId } from '../lib/ids.js';
+import { asyncHandler } from '../middleware/db-errors.js';
 
 const router = Router();
 
@@ -74,20 +76,15 @@ router.get('/active-tournament', async (_req, res) => {
   }
 });
 
-router.get('/bracket', async (req, res) => {
-  try {
-    const tournamentId = req.query.tournamentId
-      ? parseInt(req.query.tournamentId, 10)
-      : await getActiveTournamentId();
-    if (!tournamentId) return res.json({ tournament: null, rounds: [], matches: [] });
+router.get('/bracket', asyncHandler(async (req, res) => {
+  const tournamentId = req.query.tournamentId
+    ? parseOptionalEntityId(req.query.tournamentId, 'tournaments', 'id')
+    : await getActiveTournamentId();
+  if (!tournamentId) return res.json({ tournament: null, rounds: [], matches: [] });
 
-    const data = await loadTournamentBracket(tournamentId);
-    res.json(data);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to load bracket' });
-  }
-});
+  const data = await loadTournamentBracket(tournamentId);
+  res.json(data);
+}));
 
 router.get('/results', async (_req, res) => {
   try {

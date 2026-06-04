@@ -71,9 +71,11 @@ export async function setActiveTournament(tournamentId, adminId = null) {
 }
 
 export async function logAdminAction(adminId, action, entityType, entityId, details = {}) {
+  const entityIdValue =
+    entityId === undefined || entityId === null ? null : String(entityId);
   await pool.query(
     `INSERT INTO admin_audit_logs (admin_id, action, entity_type, entity_id, details)
      VALUES ($1, $2, $3, $4, $5)`,
-    [adminId, action, entityType, entityId, JSON.stringify(details)]
+    [adminId, action, entityType, entityIdValue, JSON.stringify(details)]
   );
 }

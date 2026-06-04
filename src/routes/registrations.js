@@ -10,6 +10,12 @@ import {
   tournamentToPublicPhase,
   logAdminAction,
 } from '../services/active-tournament.js';
+import {
+  parseOptionalEntityId,
+  parseProfileId,
+  parseRegistrationId,
+} from '../lib/ids.js';
+import { asyncHandler } from '../middleware/db-errors.js';
 
 const router = Router();
 
@@ -124,8 +130,9 @@ router.get('/', requireAdmin, async (req, res) => {
     const params = [];
     const clauses = [];
     if (tournamentId) {
-      clauses.push(`r.tournament_id = $${params.length + 1}`);
-      params.push(parseInt(tournamentId, 10));
+      const tid = parseOptionalEntityId(tournamentId, 'registrations', 'tournament_id');
+      clauses.push(`r.tournament_id::text = $${params.length + 1}::text`);
+      params.push(String(tid));
     }
     if (status) {
       clauses.push(`r.status = $${params.length + 1}`);
@@ -141,9 +148,9 @@ router.get('/', requireAdmin, async (req, res) => {
   }
 });
 
-router.get('/stats', requireAdmin, async (req, res) => {
+router.get('/stats', requireAdmin, asyncHandler(async (req, res) => {
   const tournamentId = req.query.tournamentId
-    ? parseInt(req.query.tournamentId, 10)
+    ? parseOptionalEntityId(req.query.tournamentId, 'registrations', 'tournament_id')
     : await getActiveTournamentId();
   const result = await pool.query(
     `SELECT
@@ -152,11 +159,11 @@ router.get('/stats', requireAdmin, async (req, res) => {
       COUNT(*) FILTER (WHERE status = 'approved')::int AS approved,
       COUNT(*) FILTER (WHERE status = 'rejected')::int AS rejected
     FROM registrations
-    WHERE ($1::int IS NULL OR tournament_id = $1)`,
-    [tournamentId || null]
+    WHERE ($1::text IS NULL OR tournament_id::text = $1::text)`,
+    [tournamentId != null ? String(tournamentId) : null]
   );
   res.json({ ...result.rows[0], tournamentId });
-});
+}));
 
 router.get('/export', requireAdmin, async (req, res) => {
   const tournamentId = req.query.tournamentId;
@@ -164,8 +171,9 @@ router.get('/export', requireAdmin, async (req, res) => {
     LEFT JOIN tournaments t ON t.id = r.tournament_id`;
   const params = [];
   if (tournamentId) {
-    query += ' WHERE r.tournament_id = $1';
-    params.push(parseInt(tournamentId, 10));
+    const tid = parseOptionalEntityId(tournamentId, 'registrations', 'tournament_id');
+    query += ' WHERE r.tournament_id::text = $1::text';
+    params.push(String(tid));
   }
   query += ' ORDER BY r.created_at DESC';
   const result = await pool.query(query, params);
@@ -174,7 +182,7 @@ router.get('/export', requireAdmin, async (req, res) => {
 
 router.patch('/:id/approve', requireAdmin, async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = parseRegistrationId(req.params.id);
     const result = await pool.query(
       `UPDATE registrations SET status = 'approved', rejection_reason = NULL,
         reviewed_at = NOW(), reviewed_by = $2
@@ -205,7 +213,7 @@ router.patch('/:id/approve', requireAdmin, async (req, res) => {
 
 router.get('/by-profile/:profileId', requireAdmin, async (req, res) => {
   try {
-    const profileId = parseInt(req.params.profileId, 10);
+    const profileId = parseProfileId(req.params.profileId);
     const [profile, registrations] = await Promise.all([
       pool.query('SELECT id, email, first_name, last_name FROM player_profiles WHERE id = $1', [profileId]),
       pool.query(
@@ -226,7 +234,7 @@ router.get('/by-profile/:profileId', requireAdmin, async (req, res) => {
 
 router.patch('/:id/reject', requireAdmin, async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = parseRegistrationId(req.params.id);
     const { reason } = req.body;
     if (!reason?.trim()) {
       return res.status(400).json({ error: 'Rejection reason is required' });

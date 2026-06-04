@@ -8,6 +8,8 @@ import {
   tournamentToPublicPhase,
   logAdminAction,
 } from '../services/active-tournament.js';
+import { parseTournamentId } from '../lib/ids.js';
+import { asyncHandler } from '../middleware/db-errors.js';
 
 const router = Router();
 
@@ -142,16 +144,16 @@ router.post('/phase/:phase', requireAdmin, async (req, res) => {
   }
 });
 
-router.post('/active-tournament/:id', requireAdmin, async (req, res) => {
+router.post('/active-tournament/:id', requireAdmin, asyncHandler(async (req, res) => {
   try {
-    const tournament = await setActiveTournament(parseInt(req.params.id, 10), req.admin.id);
+    const tournament = await setActiveTournament(parseTournamentId(req.params.id), req.admin.id);
     const settings = await getSiteSettings();
     res.json(toResponse(settings, tournament));
   } catch (err) {
     console.error(err);
     res.status(400).json({ error: err.message || 'Failed to set active tournament' });
   }
-});
+}));
 
 export default router;
 export { getSiteSettings };
