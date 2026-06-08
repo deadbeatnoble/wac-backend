@@ -38,10 +38,10 @@ router.put('/pages/:slug', requireAdmin, async (req, res) => {
     }
 
     const { title, status, blocks, meta, texts } = req.body;
-    let metaPayload = meta;
+    const existing = await pool.query('SELECT meta FROM cms_pages WHERE slug = $1', [slug]);
+    const currentMeta = existing.rows[0]?.meta || {};
+    let metaPayload = meta ? { ...currentMeta, ...meta } : currentMeta;
     if (texts && VALID_SLUGS.includes(slug)) {
-      const existing = await pool.query('SELECT meta FROM cms_pages WHERE slug = $1', [slug]);
-      const currentMeta = existing.rows[0]?.meta || {};
       metaPayload = { ...currentMeta, ...(meta || {}), texts };
     }
     const result = await pool.query(
